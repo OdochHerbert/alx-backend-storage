@@ -1,86 +1,93 @@
 #!/usr/bin/env python3
-''' redis module '''
-
+""" Writing strings to Redis, Reading from Redis and recovering original type,
+    Incrementing values, Storing lists, Retrieving lists """
+from typing import Union, Callable, Optional, Any
 import redis
 import uuid
-from typing import Union, Callable, Optional
 from functools import wraps
 
 
-def count_calls(method: Callable) -> Callable:
-    ''' decorator function that returns callable '''
+def call_history(method: Callable) -> Callable:
+    """ store the history of inputs and outputs for a particular function """
+    key = method.__qualname__
+    inputs = key + ":inputs"
+    outputs = key + ":outputs"
+
     @wraps(method)
     def wrapper(self, *args, **kwds):
-        ''' wrapper function '''
-        my_key = method.__qualname__
-        self._redis.incr(my_key)
+        """ wrapped function """
+        self._redis.rpush(inputs, str(args))
+        data = method(self, *args, **kwds)
+        self._redis.rpush(outputs, str(data))
+        return data
+    return wrapper
+
+
+def count_calls(method: Callable) -> Callable:
+    """ to count how many times methods of the Cache class are called """
+    key = method.__qualname__
+
+    @wraps(method)
+    def wrapper(self, *args, **kwds):
+        """ wrapped function """
+        self._redis.incr(key)
         return method(self, *args, **kwds)
     return wrapper
 
 
-def call_history(method: Callable) -> Callable:
-    ''' another decorator function that returns a callble '''
-    @wraps(method)
-    def wrapper(self, *args, **kwds):
-        ''' wrapper function '''
-        my_key = method.__qualname__
-        input_key = my_key + ":inputs"
-        output_key = my_key + ":outputs"
-        data = str(args)
-        self._redis.rpush(input_key, data)
-        output_list = method(self, *args, **kwds)
-        self._redis.rpush(output_key, str(output_list))
-        return output_list
-    return wrapper
-
-
-def replay(func: Callable):
-    ''' displays history of call of a particular function '''
-    r = redis.Redis()
-    my_key = func.__qualname__
-    inp_key = r.lrange("{}:inputs".format(my_key), 0, -1)
-    outp_key = r.lrange("{}:outputs".format(my_key), 0, -1)
-    num_calls = len(inp_key)
-    num_times = 'times'
-    if num_calls < 2:
-        num_times = 'time'
-    my_output = '{} was called {} {}:'.format(my_key, num_calls, num_times)
-    print(my_output)
-    for ky, val in zip(inp_key, outp_key):
-        my_output = '{}(*{}) -> {}'.format(
-            my_key,
-            ky.decode('utf-8'),
-            val.decode('utf-8')
-        )
-        print(my_output)
-
-
-class Cache():
-    ''' a cache class '''
+class Cache:
+    """ class """
     def __init__(self):
-        ''' initialize redis instance '''
+        """ constructor - store an instance of the Redis client as a private
+        variable named _redis and flush the instance using flushdb """
         self._redis = redis.Redis()
         self._redis.flushdb()
 
     @call_history
     @count_calls
     def store(self, data: Union[str, bytes, int, float]) -> str:
-        ''' generates a random key '''
-        gen_key = str(uuid.uuid4())
-        self._redis.set(gen_key, data)
-        return gen_key
+        """ generate a random key (e.g. using uuid), store the input data in
+        Redis using the random key and return the key """
+        key = str(uuid.uuid4())
+        self._redis.set(key, data)
+        return key
 
     def get(self, key: str,
             fn: Optional[Callable] = None) -> Union[str, bytes, int, float]:
-        ''' get method key value '''
-        val = self._redis.get(key)
-        return val if not fn else fn(val)
+        """ take a key string argument and an optional Callable argument named
+            fn. This callable will be used to convert the data back to the
+            desired format """
+        data = self._redis.get(key)
+        if fn:
+            return fn(data)
+        return data
 
-    def get_str(self, key) -> str:
-        ''' returns value string '''
-        str_val = self._redis.get(key)
-        return str_val.decode('utf-8')
+    def get_str(self, key: str) -> str:
+        """ automatically parametrize Cache.get to str """
+        data = self._redis.get(key)
+        return data.decode("utf-8")
 
-    def get_int(self, key) -> int:
-        ''' returns int '''
-        return self.get(key, int)
+    def get_int(self, key: str) -> int:
+        """ automatically parametrize Cache.get to int """
+        data = self._redis.get(key)
+        try:
+            data = int(value.decode("utf-8"))
+        except Exception:
+            data = 0
+        return data
+
+
+def replay(method: Callable):
+    """ display the history of calls of a particular function """
+    key = method.__qualname__
+    inputs = key + ":inputs"
+    outputs = key + ":outputs"
+    redis = method.__self__._redis
+    count = redis.get(key).decode("utf-8")
+    print("{} was called {} times:".format(key, count))
+    inputList = redis.lrange(inputs, 0, -1)
+    outputList = redis.lrange(outputs, 0, -1)
+    redis_zipped = list(zip(inputList, outputList))
+    for a, b in redis_zipped:
+        attr, data = a.decode("utf-8"), b.decode("utf-8")
+        print("{}(*{}) -> {}".format(key, attr, data))
